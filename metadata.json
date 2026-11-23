@@ -1,0 +1,6 @@
+{
+  "name": "COUPON EXCHANGE",
+  "description": "Browse available menu items, choose items, enter your name, and exchange coupons with persistent Firestore storage and an administrator dashboard.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

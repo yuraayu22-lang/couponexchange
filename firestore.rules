@@ -1,0 +1,158 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Global default-deny safety net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // --- Primitive Helpers ---
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerifiedUser() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isAdmin() {
+      return isVerifiedUser() && (
+        request.auth.token.email == 'yuraayu22@gmail.com' ||
+        exists(/databases/$(database)/documents/admins/$(request.auth.uid))
+      );
+    }
+
+    // --- Validation Blueprints ---
+    function isValidMenuItem(data) {
+      return data.keys().hasAll([
+          'name', 'category', 'description', 'couponCost',
+          'iconKey', 'imageUrl', 'available', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'name', 'category', 'description', 'couponCost',
+          'iconKey', 'imageUrl', 'available', 'createdAt', 'updatedAt'
+        ])
+        && data.name is string && data.name.size() >= 1 && data.name.size() <= 80
+        && data.category is string && data.category in ['Food', 'Drink', 'Snack', 'Special']
+        && data.description is string && data.description.size() >= 1 && data.description.size() <= 280
+        && data.couponCost is int && data.couponCost >= 1 && data.couponCost <= 100
+        && data.iconKey is string && data.iconKey in [
+          'utensils', 'burger', 'coffee', 'cookie', 'sparkles', 'salad', 'pizza', 'cup-soda'
+        ]
+        && data.imageUrl is string && data.imageUrl.size() <= 500
+        && data.available is bool
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isDefaultSeedMenuItem(itemId, data) {
+      return !exists(/databases/$(database)/documents/menu_items/$(itemId))
+        && isValidMenuItem(data)
+        && data.createdAt == request.time
+        && data.updatedAt == request.time
+        && data.available == true
+        && (
+          (itemId == 'food-item-a' && data.name == 'Food Item A' && data.couponCost == 2 && data.category == 'Food') ||
+          (itemId == 'food-item-b' && data.name == 'Food Item B' && data.couponCost == 3 && data.category == 'Food') ||
+          (itemId == 'drink-item-a' && data.name == 'Drink Item A' && data.couponCost == 1 && data.category == 'Drink') ||
+          (itemId == 'snack-item-a' && data.name == 'Snack Item A' && data.couponCost == 2 && data.category == 'Snack') ||
+          (itemId == 'special-item' && data.name == 'Special Item' && data.couponCost == 5 && data.category == 'Special')
+        );
+    }
+
+    function isValidSelection(data) {
+      return data.keys().hasAll([
+          'userName', 'menuItemId', 'menuItemName', 'couponsRequired',
+          'status', 'submittedByUid', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'userName', 'menuItemId', 'menuItemName', 'couponsRequired',
+          'status', 'submittedByUid', 'createdAt', 'updatedAt'
+        ])
+        && data.userName is string && data.userName.size() >= 2 && data.userName.size() <= 80
+        && isValidId(data.menuItemId)
+        && data.menuItemName is string && data.menuItemName.size() >= 1 && data.menuItemName.size() <= 80
+        && data.couponsRequired is int && data.couponsRequired >= 1 && data.couponsRequired <= 100
+        && data.status is string && data.status in ['saved', 'fulfilled', 'cancelled']
+        && data.submittedByUid is string && data.submittedByUid.size() <= 128
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    // --- Collections ---
+    match /admins/{adminId} {
+      allow get: if isSignedIn() && isValidId(adminId) && (request.auth.uid == adminId || isAdmin());
+      allow list, create, update, delete: if false;
+    }
+
+    match /menu_items/{itemId} {
+      allow get: if isValidId(itemId);
+      allow list: if true;
+
+      allow create: if isValidId(itemId) && isValidMenuItem(incoming()) && (
+        (isAdmin() && incoming().createdAt == request.time && incoming().updatedAt == request.time) ||
+        isDefaultSeedMenuItem(itemId, incoming())
+      );
+
+      allow update: if isValidId(itemId)
+        && isAdmin()
+        && isValidMenuItem(incoming())
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'name', 'category', 'description', 'couponCost',
+          'iconKey', 'imageUrl', 'available', 'updatedAt'
+        ]);
+
+      allow delete: if isValidId(itemId) && isAdmin();
+    }
+
+    match /selections/{selectionId} {
+      allow get: if isValidId(selectionId) && (
+        isAdmin() ||
+        (isSignedIn() && existing().submittedByUid == request.auth.uid) ||
+        selectionId.size() >= 20
+      );
+
+      allow list: if isAdmin() || (
+        isSignedIn() && resource.data.submittedByUid == request.auth.uid
+      );
+
+      allow create: if isValidId(selectionId)
+        && selectionId.size() >= 20
+        && isValidSelection(incoming())
+        && incoming().status == 'saved'
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time
+        && (incoming().submittedByUid == '' || (isSignedIn() && incoming().submittedByUid == request.auth.uid))
+        && exists(/databases/$(database)/documents/menu_items/$(incoming().menuItemId))
+        && get(/databases/$(database)/documents/menu_items/$(incoming().menuItemId)).data.available == true
+        && get(/databases/$(database)/documents/menu_items/$(incoming().menuItemId)).data.couponCost == incoming().couponsRequired
+        && get(/databases/$(database)/documents/menu_items/$(incoming().menuItemId)).data.name == incoming().menuItemName;
+
+      allow update: if isValidId(selectionId)
+        && isAdmin()
+        && isValidSelection(incoming())
+        && incoming().createdAt == existing().createdAt
+        && incoming().submittedByUid == existing().submittedByUid
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'userName', 'menuItemId', 'menuItemName', 'couponsRequired', 'status', 'updatedAt'
+        ]);
+
+      allow delete: if isValidId(selectionId) && isAdmin();
+    }
+  }
+}
